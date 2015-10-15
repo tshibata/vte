@@ -6504,23 +6504,8 @@ cursor_inside_match (VteTerminal *terminal, long x, long y)
 {
 	glong col = x / terminal->pvt->char_width;
 	glong row = _vte_terminal_pixel_to_row(terminal, y);
-	if (terminal->pvt->match_start.row == terminal->pvt->match_end.row) {
-		return row == terminal->pvt->match_start.row &&
-			col >= terminal->pvt->match_start.col &&
-			col <= terminal->pvt->match_end.col;
-	} else {
-		if (row < terminal->pvt->match_start.row ||
-				row > terminal->pvt->match_end.row) {
-			return FALSE;
-		}
-		if (row == terminal->pvt->match_start.row) {
-			return col >= terminal->pvt->match_start.col;
-		}
-		if (row == terminal->pvt->match_end.row) {
-			return col <= terminal->pvt->match_end.col;
-		}
-		return TRUE;
-	}
+
+        return rowcol_inside_match(terminal, row, col);
 }
 
 static void
