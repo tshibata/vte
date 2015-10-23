@@ -383,6 +383,16 @@ _vte_terminal_set_default_attributes(VteTerminal *terminal)
         terminal->pvt->fill_defaults = terminal->pvt->defaults;
 }
 
+/* Height excluding padding, but including additional bottom area if not grid aligned */
+static inline glong
+_vte_terminal_usable_height_px (VteTerminal *terminal)
+{
+        GtkAllocation allocation;
+        gtk_widget_get_allocation (&terminal->widget, &allocation);
+
+        return allocation.height - terminal->pvt->padding.top - terminal->pvt->padding.bottom;
+}
+
 static inline glong
 _vte_terminal_scroll_delta_pixel (VteTerminal *terminal)
 {
@@ -416,11 +426,20 @@ _vte_terminal_first_displayed_row (VteTerminal *terminal)
 static inline glong
 _vte_terminal_last_displayed_row (VteTerminal *terminal)
 {
-        GtkAllocation allocation;
+        glong r;
 
-        gtk_widget_get_allocation (&terminal->widget, &allocation);
-        return _vte_terminal_pixel_to_row (terminal,
-                                           allocation.height - terminal->pvt->padding.top - terminal->pvt->padding.bottom - 1);
+        /* Get the logical row number displayed at the bottom pixel position */
+        r = _vte_terminal_pixel_to_row (terminal,
+                                        _vte_terminal_usable_height_px (terminal) - 1);
+
+        /* If we have an extra padding at the bottom which is currently unused,
+         * this number is one too big. Adjust here.
+         * E.g. have a terminal of size 80 x 24.5.
+         * Initially the bottom displayed row is (0-based) 23, but r is now 24.
+         * After producing more than a screenful of content and scrolling back
+         * all the way to the top, the bottom displayed row is (0-based) 24. */
+        r = MIN (r, terminal->pvt->screen->insert_delta + terminal->pvt->row_count - 1);
+        return r;
 }
 
 /* x, y are coordinates excluding the padding.
@@ -433,21 +452,20 @@ _vte_terminal_mouse_pixels_to_grid (VteTerminal *terminal,
                                     long *col, long *row)
 {
         VteTerminalPrivate *pvt = terminal->pvt;
-        long c, r;
+        long c, r, fr, lr;
 
-        /* Vertical is tricky: combine smooth scrolling, extra area near the bottom,
-         * and scrollbar being dragged back a bit. */
-        /* Confine top padding clicks while still in pixels. */
-        y = MAX(y, 0);
+        /* Confine clicks to the nearest actual cell. This is especially useful for
+         * fullscreen vte so that you can click on the very edge of the screen. */
         r = _vte_terminal_pixel_to_row(terminal, y);
-        /* Clicking on scrollback area. */
-        if (r < terminal->pvt->screen->insert_delta)
-                return FALSE;
-        r -= terminal->pvt->screen->insert_delta;
-        /* Handle bottom padding now. */
-        r = MIN(r, terminal->pvt->row_count - 1);
+        fr = _vte_terminal_first_displayed_row (terminal);
+        lr = _vte_terminal_last_displayed_row (terminal);
+        r = CLAMP (r, fr, lr);
 
-        /* After these, horizontal is piece of cake. */
+        /* Bail out if clicking on scrollback contents: bug 755187. */
+        if (r < pvt->screen->insert_delta)
+                return FALSE;
+        r -= pvt->screen->insert_delta;
+
         c = x / pvt->char_width;
         c = CLAMP (c, 0, pvt->column_count - 1);
 
@@ -485,9 +503,9 @@ _vte_invalidate_cells(VteTerminal *terminal,
 	if (!column_count || !row_count) {
 		return;
 	}
+
 	if (column_count == terminal->pvt->column_count &&
-            row_count == terminal->pvt->row_count &&
-            terminal->pvt->screen->scroll_delta == terminal->pvt->screen->insert_delta) {
+			row_count == terminal->pvt->row_count) {
 		_vte_invalidate_all (terminal);
 		return;
 	}
@@ -499,22 +517,22 @@ _vte_invalidate_cells(VteTerminal *terminal,
 	 * Always include the extra pixel border and overlap pixel.
 	 */
         rect.x = terminal->pvt->padding.left + column_start * terminal->pvt->char_width - 1;
-        if (rect.x <= 0 /* TODOegmont if artifacts remain on the screen then: terminal->pvt->padding.left */)
+        if (rect.x <= 0)
                 rect.x = 0;
         /* Temporarily misuse rect.width for the end x coordinate... */
         rect.width = terminal->pvt->padding.left + (column_start + column_count) * terminal->pvt->char_width + 2; /* TODO why 2 and not 1? */
-        if (rect.width >= allocation.width /* TODOegmont if artifacts remain on the screen then: terminal->pvt->padding.left + terminal->pvt->column_count * terminal->pvt->char_width */)
+        if (rect.width >= allocation.width)
                 rect.width = allocation.width;
         /* ... fix that here */
 	rect.width -= rect.x;
 
         rect.y = terminal->pvt->padding.top + _vte_terminal_row_to_pixel(terminal, row_start) - 1;
-        if (rect.y <= 0 /* TODOegmont if artifacts remain on the screen then: terminal->pvt->padding.top */)
+        if (rect.y <= 0)
                 rect.y = 0;
 
         /* Temporarily misuse rect.height for the end y coordinate... */
         rect.height = terminal->pvt->padding.top + _vte_terminal_row_to_pixel(terminal, row_start + row_count) + 1;
-        if (rect.height >= allocation.height /* TODOegmont if artifacts remain on the screen then: terminal->pvt->padding.top + terminal->pvt->row_count * terminal->pvt->char_height */)
+        if (rect.height >= allocation.height)
                 rect.height = allocation.height;
         /* ... fix that here */
         rect.height -= rect.y;
@@ -2206,7 +2224,6 @@ rowcol_from_event(VteTerminal *terminal,
                   long *row)
 {
         double x, y;
-        GtkAllocation allocation;
 
         if (event == NULL)
                 return FALSE;
@@ -2215,12 +2232,10 @@ rowcol_from_event(VteTerminal *terminal,
         if (!gdk_event_get_coords(event, &x, &y))
                 return FALSE;
 
-        gtk_widget_get_allocation (&terminal->widget, &allocation);
-
         x -= terminal->pvt->padding.left;
         y -= terminal->pvt->padding.top;
         if (x < 0 || x >= terminal->pvt->column_count * terminal->pvt->char_width ||
-            y < 0 || y >= allocation.height - terminal->pvt->padding.top - terminal->pvt->padding.bottom)
+            y < 0 || y >= _vte_terminal_usable_height_px (terminal))
                 return FALSE;
         *column = x / terminal->pvt->char_width;
         *row = _vte_terminal_pixel_to_row(terminal, y);
@@ -6639,7 +6654,8 @@ vte_terminal_match_hilite(VteTerminal *terminal, long x, long y)
 	}
 
 	/* If the pointer hasn't moved to another character cell, then we
-	 * need do nothing. */
+	 * need do nothing. Note: Don't use mouse_last_col as that's relative
+	 * to insert_delta, and we care about the absolute row number. */
 	if (x / terminal->pvt->char_width  == terminal->pvt->mouse_last_x / terminal->pvt->char_width &&
 	    _vte_terminal_pixel_to_row(terminal, y) == _vte_terminal_pixel_to_row(terminal, terminal->pvt->mouse_last_y)) {
 		terminal->pvt->show_match = terminal->pvt->match != NULL;
@@ -7336,7 +7352,7 @@ vte_terminal_invalidate_selection (VteTerminal *terminal)
 				terminal->pvt->selection_block_mode);
 }
 
-/* Confine coordinates into the visible area. Padding is alreday subtracted. */
+/* Confine coordinates into the visible area. Padding is already subtracted. */
 static void
 vte_terminal_confine_coordinates (VteTerminal *terminal, long *xp, long *yp)
 {
@@ -7345,9 +7361,8 @@ vte_terminal_confine_coordinates (VteTerminal *terminal, long *xp, long *yp)
         long y_stop;
 
         /* Allow to use the bottom extra padding only if there's content there. */
-        y_stop = _vte_terminal_last_displayed_row (terminal) + 1;
-        y_stop = MIN(y_stop, _vte_terminal_row_to_pixel(terminal, _vte_ring_next(terminal->pvt->screen->row_data)));
-        y_stop = MAX(y_stop, terminal->pvt->row_count * terminal->pvt->char_height);
+        y_stop = MIN(_vte_terminal_usable_height_px (terminal),
+                     _vte_terminal_row_to_pixel(terminal, terminal->pvt->screen->insert_delta + terminal->pvt->row_count));
 
 	if (y < 0) {
 		y = 0;
@@ -7664,6 +7679,7 @@ vte_terminal_extend_selection(VteTerminal *terminal, long x, long y,
 {
 	int width, height;
 	long residual;
+	long row;
 	struct selection_event_coords *origin, *last, *start, *end;
 	VteVisualPosition old_start, old_end, *sc, *ec, *so, *eo;
 	gboolean invalidate_selected = FALSE;
@@ -7742,8 +7758,9 @@ vte_terminal_extend_selection(VteTerminal *terminal, long x, long y,
 		 * closer to the new point. */
 		if (always_grow) {
 			/* New endpoint is before existing selection. */
-			if (_vte_terminal_pixel_to_row(terminal, y) < start->y / height ||
-			    ((_vte_terminal_pixel_to_row(terminal, y) == start->y / height) &&
+                        row = _vte_terminal_pixel_to_row(terminal, y);
+			if ((row < start->y / height) ||
+			    ((row == start->y / height) &&
 			     (x / width < start->x / width))) {
 				start->x = x;
 				start->y = _vte_terminal_scroll_delta_pixel(terminal) + y;
@@ -7936,9 +7953,6 @@ vte_terminal_autoscroll(VteTerminal *terminal)
 	gboolean extend = FALSE;
 	long x, y, xmax, ymax;
 	glong adj;
-        GtkAllocation allocation;
-
-        gtk_widget_get_allocation (&terminal->widget, &allocation);
 
 	/* Provide an immediate effect for mouse wigglers. */
 	if (terminal->pvt->mouse_last_y < 0) {
@@ -7950,8 +7964,7 @@ vte_terminal_autoscroll(VteTerminal *terminal)
 		}
 		_vte_debug_print(VTE_DEBUG_EVENTS, "Autoscrolling down.\n");
 	}
-	if (terminal->pvt->mouse_last_y >=
-            allocation.height - terminal->pvt->padding.top - terminal->pvt->padding.bottom) {
+	if (terminal->pvt->mouse_last_y >= _vte_terminal_usable_height_px (terminal)) {
 		if (terminal->pvt->vadjustment) {
 			/* Try to scroll up by one line. */
 			adj = terminal->pvt->screen->scroll_delta + 1;
