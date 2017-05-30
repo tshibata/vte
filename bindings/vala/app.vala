@@ -425,22 +425,11 @@ class Window : Gtk.ApplicationWindow
     terminal.realize();
 
     if (App.Options.geometry != null) {
-      if (parse_geometry(App.Options.geometry)) {
-        /* After parse_geometry(), we can get the default size in
-         * width/height increments, i.e. in grid size.
-         */
-        int columns, rows;
-        get_default_size(out columns, out rows);
+      int columns, rows;
+      if (App.Options.geometry.scanf("%dx%d", out columns, out rows) == 2) {
         terminal.set_size(columns, rows);
-        resize_to_geometry(columns, rows);
       } else
         printerr("Failed to parse geometry spec \"%s\"\n", App.Options.geometry);
-    } else {
-      /* In GTK+ 3.0, the default size of a window comes from its minimum
-       * size not its natural size, so we need to set the right default size
-       * explicitly */
-      set_default_geometry((int)terminal.get_column_count(),
-                           (int)terminal.get_row_count());
     }
   }
 
